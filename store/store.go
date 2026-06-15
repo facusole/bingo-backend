@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/facu/bingo-back/card"
+	"github.com/facu/bingo-back/game"
+
 	"github.com/google/uuid"
 )
 
@@ -44,8 +46,19 @@ type Room struct {
 	state   JoinState
 
 	// lastAct updates on every visible activity (join/leave, admin action, number draw)
-	lastAct time.Time
-	mu      sync.Mutex // protects players, state, lastAct
+	lastAct     time.Time
+	bag         []int
+	drawn       []int
+	lineAwarded bool
+	mu          sync.Mutex // protects players, state, lastAct, bag, drawn, lineAwarded
+}
+
+// DrawResult is the outcome of a single number draw.
+type DrawResult struct {
+	Number       int
+	LineWinners  []PlayerID // non-empty only on the draw that awards the line
+	BingoWinners []PlayerID // non-empty when one or more cards are complete
+	Finished     bool       // true when this draw produced a bingo winner
 }
 
 // Store keeps all active rooms in memory
@@ -118,6 +131,79 @@ func (r *Room) MarkDisconnected(pid PlayerID) {
 	r.lastAct = time.Now()
 }
 
+// resetGame reassigns cards, refills the bag and sets the room active.
+// The caller must hold r.mu.
+func (r *Room) resetGame() error {
+	for _, p := range r.players {
+		c, err := card.GenerateCard()
+		if err != nil {
+			return err
+		}
+		p.Card = c
+	}
+	r.bag = game.NewBag()
+	r.drawn = nil
+	r.lineAwarded = false
+	r.state = StateActive
+	r.lastAct = time.Now()
+	return nil
+}
+
+// Start begins a new game: fresh cards for every player, a new bag, state active.
+func (r *Room) Start() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resetGame()
+}
+
+// Restart begins a new game in the same room with the players still present.
+func (r *Room) Restart() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resetGame()
+}
+
+// DrawNext pops the next number, records it and evaluates prizes atomically.
+func (r *Room) DrawNext() (DrawResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.state != StateActive {
+		return DrawResult{}, fmt.Errorf("room %s is not active", r.ID)
+	}
+	if len(r.bag) == 0 {
+		return DrawResult{}, fmt.Errorf("room %s has no numbers left", r.ID)
+	}
+
+	n := r.bag[0]
+	r.bag = r.bag[1:]
+	r.drawn = append(r.drawn, n)
+	r.lastAct = time.Now()
+
+	res := DrawResult{Number: n}
+	for _, p := range r.players {
+		// skip players with no card yet (shouldn't happen while active)
+		if p.Card == (card.Card{}) {
+			continue
+		}
+		if !r.lineAwarded && game.HasLine(p.Card, r.drawn) {
+			res.LineWinners = append(res.LineWinners, p.ID)
+		}
+		if game.CardComplete(p.Card, r.drawn) {
+			res.BingoWinners = append(res.BingoWinners, p.ID)
+		}
+	}
+	if len(res.LineWinners) > 0 {
+		r.lineAwarded = true
+	}
+	if len(res.BingoWinners) > 0 {
+		res.Finished = true
+		r.state = StateFinished
+	}
+
+	return res, nil
+}
+
 // AddRoom inserts a new room into the store. Returns an error if the ID already exists.
 func (s *Store) AddRoom(r *Room) error {
 	s.mu.Lock()
@@ -179,6 +265,19 @@ func (s *Store) AddPlayer(roomID RoomID, name string) (*Player, error) {
 	if len(room.players) >= maxPlayers {
 		return nil, fmt.Errorf("room %s is full", roomID)
 	}
+	if room.state == StateActive {
+		// generate a card now; regenerate in the rare case it is already complete
+		for {
+			c, err := card.GenerateCard()
+			if err != nil {
+				return nil, err
+			}
+			if !game.CardComplete(c, room.drawn) {
+				player.Card = c
+				break
+			}
+		}
+	}
 	room.players[pid] = player
 	room.lastAct = time.Now()
 	return player, nil
@@ -213,14 +312,20 @@ func (s *Store) RemovePlayer(roomID RoomID, pid PlayerID) {
 	room.lastAct = time.Now()
 }
 
-// CleanupInactiveRooms removes rooms that have been idle longer than d and are not in an active state.
+// CleanupInactiveRooms removes rooms with no connected players that have been idle longer than d.
 func (s *Store) CleanupInactiveRooms(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	for id, r := range s.rooms {
 		r.mu.Lock()
-		idle := now.Sub(r.lastAct) > d && r.state == StateIdle
+		connected := 0
+		for _, p := range r.players {
+			if p.Connected {
+				connected++
+			}
+		}
+		idle := now.Sub(r.lastAct) > d && connected == 0
 		r.mu.Unlock()
 		if idle {
 			delete(s.rooms, id)
