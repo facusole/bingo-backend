@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 
 	"github.com/facu/bingo-back/card"
 )
@@ -209,5 +210,29 @@ func assertSameSet(t *testing.T, label string, got []PlayerID, want map[PlayerID
 		if !want[id] {
 			t.Fatalf("%s: unexpected id %q in %v", label, id, got)
 		}
+	}
+}
+
+func TestCleanupInactiveRooms(t *testing.T) {
+	s := NewStore()
+
+	// abandonada: sin nadie conectado y vieja
+	old, _, _ := s.CreateRoom("a")
+	old.lastAct = time.Now().Add(-time.Hour)
+
+	// viva: tiene un jugador conectado
+	live, _, _ := s.CreateRoom("b")
+	s.AddPlayer(live.ID, "p") // AddPlayer deja Connected=true
+
+	removed := s.CleanupInactiveRooms(30 * time.Minute)
+
+	if len(removed) != 1 || removed[0] != old.ID {
+		t.Fatalf("removed = %v, want [%s]", removed, old.ID)
+	}
+	if _, err := s.GetRoom(old.ID); err == nil {
+		t.Fatal("la sala abandonada debería haberse borrado")
+	}
+	if _, err := s.GetRoom(live.ID); err != nil {
+		t.Fatal("la sala con un jugador conectado debería sobrevivir")
 	}
 }

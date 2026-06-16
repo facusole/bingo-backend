@@ -3,8 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"os"
 
+	"github.com/facu/bingo-back/config"
 	"github.com/facu/bingo-back/store"
 )
 
@@ -32,16 +32,9 @@ func WithCORS(next http.Handler) http.Handler {
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", corsOrigin())
+	w.Header().Set("Access-Control-Allow-Origin", config.AllowedOrigin())
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-}
-
-func corsOrigin() string {
-	if v := os.Getenv("CORS_ORIGIN"); v != "" {
-		return v
-	}
-	return "http://localhost:3000"
 }
 
 func (a *API) createRoomHandler(w http.ResponseWriter, r *http.Request) {

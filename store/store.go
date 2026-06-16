@@ -313,10 +313,11 @@ func (s *Store) RemovePlayer(roomID RoomID, pid PlayerID) {
 }
 
 // CleanupInactiveRooms removes rooms with no connected players that have been idle longer than d.
-func (s *Store) CleanupInactiveRooms(d time.Duration) {
+func (s *Store) CleanupInactiveRooms(d time.Duration) []RoomID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
+	var removed []RoomID
 	for id, r := range s.rooms {
 		r.mu.Lock()
 		connected := 0
@@ -329,6 +330,8 @@ func (s *Store) CleanupInactiveRooms(d time.Duration) {
 		r.mu.Unlock()
 		if idle {
 			delete(s.rooms, id)
+			removed = append(removed, id)
 		}
 	}
+	return removed
 }

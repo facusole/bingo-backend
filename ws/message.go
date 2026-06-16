@@ -27,8 +27,7 @@ const (
 	MsgError        = "error"
 )
 
-// Incoming is the envelope for every client -> server message. Data holds the
-// raw payload, decoded into the matching struct based on Type.
+// Incoming is the envelope for every client -> server message.
 type Incoming struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
@@ -48,8 +47,8 @@ func Encode(msgType string, data any) ([]byte, error) {
 // ---- client -> server payloads ----
 
 // JoinData is the first message a client sends. A non-empty Token means the
-// client is reconnecting; otherwise it joins as a new player.
-// The room id travels in the WebSocket URL query (/ws?room=<id>), not here.
+// client is reconnecting; otherwise it joins as a new player. The room id
+// travels in the WebSocket URL query (/ws?room=<id>), not here.
 type JoinData struct {
 	Name  string `json:"name,omitempty"`
 	Token string `json:"token,omitempty"`
@@ -60,9 +59,11 @@ type JoinData struct {
 
 // ---- server -> client payloads ----
 
-// SnapshotData is sent once, only to the joining/reconnecting client.
+// SnapshotData is sent once, only to the joining/reconnecting client. Token is
+// that client's own reconnection token (safe here because this is unicast).
 type SnapshotData struct {
 	PlayerID    string           `json:"playerId"`
+	Token       string           `json:"token"`
 	IsAdmin     bool             `json:"isAdmin"`
 	Card        card.Card        `json:"card"`
 	Drawn       []int            `json:"drawn"`
