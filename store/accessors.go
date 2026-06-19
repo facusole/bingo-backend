@@ -27,3 +27,10 @@ func (r *Room) PlayerCard(pid PlayerID) card.Card {
 	}
 	return card.Card{}
 }
+
+// Prizes returns the configured line and bingo prizes.
+func (r *Room) Prizes() (Prize, Prize) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.linePrize, r.bingoPrize
+}

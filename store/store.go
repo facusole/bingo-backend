@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -38,6 +39,13 @@ type Player struct {
 	Connected bool
 }
 
+// Prize describes a named, optional reward for line or bingo. Informative only —
+// the server tracks the configured prize but does not deliver it.
+type Prize struct {
+	Enabled bool   `json:"enabled"`
+	Name    string `json:"name"`
+}
+
 // Room represents a multiplayer bingo session
 type Room struct {
 	ID        RoomID
@@ -51,7 +59,9 @@ type Room struct {
 	bag         []int
 	drawn       []int
 	lineAwarded bool
-	mu          sync.Mutex // protects players, state, lastAct, bag, drawn, lineAwarded
+	linePrize   Prize
+	bingoPrize  Prize
+	mu          sync.Mutex // protects players, state, lastAct, bag, drawn, lineAwarded, linePrize, bingoPrize
 }
 
 // DrawResult is the outcome of a single number draw.
@@ -155,9 +165,14 @@ func (r *Room) MarkDisconnected(pid PlayerID) {
 }
 
 // resetGame reassigns cards, refills the bag and sets the room active.
+// The admin is the host and does not play, so they receive no card.
 // The caller must hold r.mu.
 func (r *Room) resetGame() error {
 	for _, p := range r.players {
+		if p.ID == r.AdminID {
+			p.Card = card.Card{}
+			continue
+		}
 		c, err := card.GenerateCard()
 		if err != nil {
 			return err
@@ -186,6 +201,80 @@ func (r *Room) Restart() error {
 	return r.resetGame()
 }
 
+// PlayerProgress reports how close a player is to line and to bingo. ToLine is
+// the minimum number of unmarked cells across the three rows; ToBingo is the
+// total unmarked cells (out of the 15 numbers on the card).
+type PlayerProgress struct {
+	PlayerID PlayerID `json:"playerId"`
+	ToLine   int      `json:"toLine"`
+	ToBingo  int      `json:"toBingo"`
+}
+
+// PlayersProgress returns the distance-to-win for every non-admin player.
+// Sorted by PlayerID for a STABLE backend contract — UX ordering ("hottest
+// player first") is the frontend's job in the tension meter; the backend
+// stays presentation-agnostic so tests and replays are deterministic.
+func (r *Room) PlayersProgress() []PlayerProgress {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	drawn := make(map[int]bool, len(r.drawn))
+	for _, n := range r.drawn {
+		drawn[n] = true
+	}
+	out := make([]PlayerProgress, 0, len(r.players))
+	for _, p := range r.players {
+		if p.ID == r.AdminID {
+			continue
+		}
+		if p.Card == (card.Card{}) {
+			continue
+		}
+		marked := 0
+		minMissing := 6 // any real row has 0-5 missing, so first row always wins
+		for row := 0; row < 3; row++ {
+			missing := 0
+			for col := 0; col < 9; col++ {
+				n := p.Card[row][col]
+				if n == 0 {
+					continue
+				}
+				if drawn[n] {
+					marked++
+				} else {
+					missing++
+				}
+			}
+			if missing < minMissing {
+				minMissing = missing
+			}
+		}
+		out = append(out, PlayerProgress{
+			PlayerID: p.ID,
+			ToLine:   minMissing,
+			ToBingo:  15 - marked,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].PlayerID < out[j].PlayerID
+	})
+	return out
+}
+
+// SetPrizes updates the room's line and bingo prizes. Only allowed in idle
+// or finished state — changing prizes mid-game would surprise players who
+// already committed to playing for the announced reward.
+func (r *Room) SetPrizes(line, bingo Prize) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == StateActive {
+		return fmt.Errorf("cannot change prizes while game is active")
+	}
+	r.linePrize = line
+	r.bingoPrize = bingo
+	r.lastAct = time.Now()
+	return nil
+}
+
 // DrawNext pops the next number, records it and evaluates prizes atomically.
 func (r *Room) DrawNext() (DrawResult, error) {
 	r.mu.Lock()
@@ -205,6 +294,11 @@ func (r *Room) DrawNext() (DrawResult, error) {
 
 	res := DrawResult{Number: n}
 	for _, p := range r.players {
+		// admin is host, never competes; check is mandatory because an empty
+		// card would satisfy HasLine/CardComplete vacuously.
+		if p.ID == r.AdminID {
+			continue
+		}
 		// skip players with no card yet (shouldn't happen while active)
 		if p.Card == (card.Card{}) {
 			continue

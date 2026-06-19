@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/facu/bingo-back/card"
 	"github.com/facu/bingo-back/config"
 	"github.com/facu/bingo-back/store"
 	"github.com/gorilla/websocket"
@@ -112,17 +113,37 @@ func (h *Handler) join(conn *websocket.Conn, room *store.Room) (*store.Player, e
 }
 
 func sendSnapshot(hub *Hub, c *Client, room *store.Room, player *store.Player) {
+	var cardPtr *card.Card
+	if player.ID != room.AdminID {
+		pc := room.PlayerCard(player.ID)
+		cardPtr = &pc
+	}
+	linePrize, bingoPrize := room.Prizes()
 	snap := SnapshotData{
 		PlayerID:    string(player.ID),
 		Token:       string(player.Token),
 		IsAdmin:     player.ID == room.AdminID,
-		Card:        room.PlayerCard(player.ID),
+		Card:        cardPtr,
 		Drawn:       room.Drawn(),
 		LineAwarded: room.LineAwarded(),
 		State:       string(room.State()),
 		Players:     PlayersToDTO(room.SnapshotPlayers(), room.AdminID),
+		LinePrize:   linePrize,
+		BingoPrize:  bingoPrize,
 	}
 	if msg, err := Encode(MsgSnapshot, snap); err == nil {
+		hub.SendTo(c, msg)
+	}
+	// Admin reconnecting to an in-progress game gets a populated tension meter.
+	// In idle state there is nothing to show; in active state we populate.
+	if player.ID == room.AdminID && room.State() == store.StateActive {
+		sendHostProgress(hub, c, room)
+	}
+}
+
+// sendHostProgress unicasts the per-player distance-to-win to the admin only.
+func sendHostProgress(hub *Hub, c *Client, room *store.Room) {
+	if msg, err := Encode(MsgHostProgress, HostProgressData{Players: room.PlayersProgress()}); err == nil {
 		hub.SendTo(c, msg)
 	}
 }

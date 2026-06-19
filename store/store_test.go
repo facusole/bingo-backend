@@ -73,6 +73,12 @@ func TestStartAssignsCards(t *testing.T) {
 		t.Fatal("lineAwarded should be false after Start")
 	}
 	for id, p := range room.players {
+		if id == room.AdminID {
+			if p.Card != (card.Card{}) {
+				t.Fatalf("admin %s should have no card after Start", id)
+			}
+			continue
+		}
 		if p.Card == (card.Card{}) {
 			t.Fatalf("player %s has no card after Start", id)
 		}
@@ -81,16 +87,21 @@ func TestStartAssignsCards(t *testing.T) {
 
 func TestDrawNextLineAndBingoTie(t *testing.T) {
 	s := NewStore()
-	room, admin, _ := s.CreateRoom("admin")
+	room, _, _ := s.CreateRoom("admin")
 	b, _ := s.AddPlayer(room.ID, "b")
+	c, _ := s.AddPlayer(room.ID, "c")
 	if err := room.Start(); err != nil {
 		t.Fatalf("Start error: %v", err)
 	}
 
-	// Make the outcome deterministic: identical card for both players and a
-	// controlled bag order (top row first, so the line completes on draw 5 and
-	// the full card on draw 15).
-	for _, p := range room.players {
+	// Make the outcome deterministic: identical card for both non-admin players
+	// and a controlled bag order (top row first, so the line completes on draw 5
+	// and the full card on draw 15). Admin keeps an empty card (host, not a
+	// player) and must never appear in winners.
+	for id, p := range room.players {
+		if id == room.AdminID {
+			continue
+		}
 		p.Card = testCard
 	}
 	room.bag = []int{10, 32, 42, 61, 80, 24, 35, 58, 71, 89, 2, 18, 47, 59, 78}
@@ -98,7 +109,7 @@ func TestDrawNextLineAndBingoTie(t *testing.T) {
 	room.lineAwarded = false
 	room.state = StateActive
 
-	want := map[PlayerID]bool{admin.ID: true, b.ID: true}
+	want := map[PlayerID]bool{b.ID: true, c.ID: true}
 
 	// draws 1-4: nothing awarded yet
 	for i := 0; i < 4; i++ {
@@ -184,9 +195,154 @@ func TestRestartResets(t *testing.T) {
 		t.Fatal("lineAwarded should be false after Restart")
 	}
 	for id, p := range room.players {
+		if id == room.AdminID {
+			if p.Card != (card.Card{}) {
+				t.Fatalf("admin %s should have no card after Restart", id)
+			}
+			continue
+		}
 		if p.Card == (card.Card{}) {
 			t.Fatalf("player %s has no card after Restart", id)
 		}
+	}
+}
+
+func TestPlayersProgress(t *testing.T) {
+	s := NewStore()
+	room, _, _ := s.CreateRoom("admin")
+	b, _ := s.AddPlayer(room.ID, "b")
+	c, _ := s.AddPlayer(room.ID, "c")
+	if err := room.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+
+	// Give both non-admin players a deterministic card. The admin keeps an
+	// empty card (host, not playing) and must NOT appear in the output.
+	for id, p := range room.players {
+		if id == room.AdminID {
+			continue
+		}
+		p.Card = testCard
+	}
+
+	// Mark 4 of the top-row numbers as drawn — b is one cell away from line,
+	// c is identical so same distance.
+	room.drawn = []int{10, 32, 42, 61} // missing 80 to complete top row
+
+	prog := room.PlayersProgress()
+	if len(prog) != 2 {
+		t.Fatalf("PlayersProgress len = %d, want 2 (admin excluded)", len(prog))
+	}
+	for _, p := range prog {
+		if p.PlayerID == room.AdminID {
+			t.Fatalf("admin %s leaked into PlayersProgress", room.AdminID)
+		}
+		if p.ToLine != 1 {
+			t.Fatalf("player %s toLine = %d, want 1", p.PlayerID, p.ToLine)
+		}
+		if p.ToBingo != 11 { // 15 - 4 marked
+			t.Fatalf("player %s toBingo = %d, want 11", p.PlayerID, p.ToBingo)
+		}
+	}
+
+	// Stable order: sorted by PlayerID ascending.
+	if !(prog[0].PlayerID < prog[1].PlayerID) {
+		t.Fatalf("PlayersProgress not sorted by PlayerID: %v", prog)
+	}
+
+	_, _ = b, c
+}
+
+func TestSetPrizes(t *testing.T) {
+	s := NewStore()
+	room, _, _ := s.CreateRoom("admin")
+
+	line := Prize{Enabled: true, Name: "Vino"}
+	bingo := Prize{Enabled: true, Name: "$5000"}
+
+	// idle is allowed
+	if err := room.SetPrizes(line, bingo); err != nil {
+		t.Fatalf("SetPrizes on idle: %v", err)
+	}
+	gotLine, gotBingo := room.Prizes()
+	if gotLine != line || gotBingo != bingo {
+		t.Fatalf("Prizes after idle SetPrizes = %+v / %+v, want %+v / %+v", gotLine, gotBingo, line, bingo)
+	}
+
+	// active is rejected
+	room.SetState(StateActive)
+	disallowed := Prize{Enabled: true, Name: "Otro"}
+	if err := room.SetPrizes(disallowed, disallowed); err == nil {
+		t.Fatal("SetPrizes during active state should fail")
+	}
+	gotLine, gotBingo = room.Prizes()
+	if gotLine != line || gotBingo != bingo {
+		t.Fatalf("Prizes were mutated despite active state: %+v / %+v", gotLine, gotBingo)
+	}
+
+	// finished is allowed again
+	room.SetState(StateFinished)
+	again := Prize{Enabled: false, Name: ""}
+	if err := room.SetPrizes(again, again); err != nil {
+		t.Fatalf("SetPrizes on finished: %v", err)
+	}
+}
+
+func TestPrizesPersistAcrossRestart(t *testing.T) {
+	s := NewStore()
+	room, _, _ := s.CreateRoom("admin")
+	s.AddPlayer(room.ID, "b")
+
+	line := Prize{Enabled: true, Name: "Vino"}
+	bingo := Prize{Enabled: true, Name: "$5000"}
+	if err := room.SetPrizes(line, bingo); err != nil {
+		t.Fatalf("SetPrizes: %v", err)
+	}
+	if err := room.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	room.SetState(StateFinished)
+	if err := room.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	gotLine, gotBingo := room.Prizes()
+	if gotLine != line || gotBingo != bingo {
+		t.Fatalf("Prizes after Restart = %+v / %+v, want %+v / %+v", gotLine, gotBingo, line, bingo)
+	}
+}
+
+// TestAdminNeverWins drains the entire bag with the admin as the only "player"
+// candidate, plus a real player. The admin's card stays empty, so a vacuous
+// HasLine/CardComplete must NOT add the admin to winners on any draw.
+func TestAdminNeverWins(t *testing.T) {
+	s := NewStore()
+	room, admin, _ := s.CreateRoom("admin")
+	b, _ := s.AddPlayer(room.ID, "b")
+	if err := room.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+
+	saw := map[PlayerID]bool{}
+	for len(room.bag) > 0 {
+		res, err := room.DrawNext()
+		if err != nil {
+			t.Fatalf("DrawNext error: %v", err)
+		}
+		for _, id := range res.LineWinners {
+			saw[id] = true
+		}
+		for _, id := range res.BingoWinners {
+			saw[id] = true
+		}
+		if res.Finished {
+			break
+		}
+	}
+	if saw[admin.ID] {
+		t.Fatalf("admin %s appeared in winners; admin must never win", admin.ID)
+	}
+	if !saw[b.ID] {
+		t.Fatalf("player %s did not win after draining the bag", b.ID)
 	}
 }
 
