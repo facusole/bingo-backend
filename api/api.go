@@ -20,9 +20,14 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 }
 
 // WithCORS sets CORS headers and answers OPTIONS preflight before the mux.
+//
+// The Origin header on the incoming request is checked against the
+// configured allow-list (CORS_ORIGIN, comma-separated). When it matches we
+// echo that exact origin back; otherwise we omit the Allow-Origin header,
+// which the browser treats as a CORS denial.
 func WithCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w)
+		setCORSHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -31,8 +36,12 @@ func WithCORS(next http.Handler) http.Handler {
 	})
 }
 
-func setCORSHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", config.AllowedOrigin())
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin != "" && config.IsAllowedOrigin(origin) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }
@@ -58,9 +67,11 @@ func (a *API) createRoomHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := struct {
 		ID         string `json:"id"`
+		ShortCode  string `json:"shortCode"`
 		AdminToken string `json:"adminToken"`
 	}{
 		ID:         string(room.ID),
+		ShortCode:  room.ShortCode,
 		AdminToken: string(admin.Token),
 	}
 	w.WriteHeader(http.StatusCreated)

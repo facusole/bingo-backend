@@ -147,6 +147,34 @@ func TestRoomNotFound(t *testing.T) {
 	}
 }
 
+func TestJoinByShortCodeResolvesToSameRoom(t *testing.T) {
+	st, wsURL, closeFn := newWSServer(t)
+	defer closeFn()
+
+	room, _, _ := st.CreateRoom("admin")
+	if room.ShortCode == "" {
+		t.Fatal("room has no short code")
+	}
+
+	// Join via short code instead of UUID.
+	c, _, err := websocket.DefaultDialer.Dial(wsURL+"?room="+room.ShortCode, nil)
+	if err != nil {
+		t.Fatalf("dial via short code: %v", err)
+	}
+	defer c.Close()
+
+	payload, _ := json.Marshal(JoinData{Name: "bob"})
+	env, _ := json.Marshal(Incoming{Type: MsgJoin, Data: payload})
+	if err := c.WriteMessage(websocket.TextMessage, env); err != nil {
+		t.Fatalf("write join: %v", err)
+	}
+
+	e := readEnv(t, c)
+	if e.Type != MsgSnapshot {
+		t.Fatalf("first message = %q, want %q", e.Type, MsgSnapshot)
+	}
+}
+
 func TestFirstMessageMustBeJoin(t *testing.T) {
 	st, wsURL, closeFn := newWSServer(t)
 	defer closeFn()

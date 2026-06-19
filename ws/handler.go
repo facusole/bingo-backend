@@ -24,24 +24,30 @@ type Handler struct {
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
-		// allow non-browser clients (no Origin) and the configured origin
-		return origin == "" || origin == config.AllowedOrigin()
+		// allow non-browser clients (no Origin) and any configured origin
+		return origin == "" || config.IsAllowedOrigin(origin)
 	},
 }
 
 // ServeWS upgrades the connection, runs the join handshake and wires the client
 // into its room's hub.
 func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
-	roomID := store.RoomID(r.URL.Query().Get("room"))
-	if roomID == "" {
+	param := r.URL.Query().Get("room")
+	if param == "" {
 		http.Error(w, "missing room", http.StatusBadRequest)
 		return
 	}
-	room, err := h.Store.GetRoom(roomID)
+	// Try the short-code alias first; if not registered, fall back to a direct
+	// roomID lookup. The lookup decides — never the length of the param.
+	room, err := h.Store.RoomByShortCode(param)
 	if err != nil {
-		http.Error(w, "room not found", http.StatusNotFound)
-		return
+		room, err = h.Store.GetRoom(store.RoomID(param))
+		if err != nil {
+			http.Error(w, "room not found", http.StatusNotFound)
+			return
+		}
 	}
+	roomID := room.ID
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

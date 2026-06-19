@@ -40,10 +40,11 @@ type Player struct {
 
 // Room represents a multiplayer bingo session
 type Room struct {
-	ID      RoomID
-	AdminID PlayerID
-	players map[PlayerID]*Player
-	state   JoinState
+	ID        RoomID
+	ShortCode string
+	AdminID   PlayerID
+	players   map[PlayerID]*Player
+	state     JoinState
 
 	// lastAct updates on every visible activity (join/leave, admin action, number draw)
 	lastAct     time.Time
@@ -63,13 +64,35 @@ type DrawResult struct {
 
 // Store keeps all active rooms in memory
 type Store struct {
-	rooms map[RoomID]*Room
-	mu    sync.RWMutex // protects the rooms map
+	rooms     map[RoomID]*Room
+	shortCode map[string]RoomID // shareable 5-char alias -> roomID
+	mu        sync.RWMutex      // protects rooms and shortCode
 }
 
 // NewStore creates an empty store
 func NewStore() *Store {
-	return &Store{rooms: make(map[RoomID]*Room)}
+	return &Store{
+		rooms:     make(map[RoomID]*Room),
+		shortCode: make(map[string]RoomID),
+	}
+}
+
+// shortCodeAlphabet is the Crockford-style alphabet used for room codes:
+// no 0/O or 1/I to avoid visual ambiguity when sharing.
+const shortCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+const shortCodeLen = 5
+
+// generateShortCode returns a random 5-char code drawn from shortCodeAlphabet.
+func generateShortCode() (string, error) {
+	b := make([]byte, shortCodeLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	out := make([]byte, shortCodeLen)
+	for i, v := range b {
+		out[i] = shortCodeAlphabet[int(v)%len(shortCodeAlphabet)]
+	}
+	return string(out), nil
 }
 
 // createUUID returns a new UUID string
@@ -212,6 +235,9 @@ func (s *Store) AddRoom(r *Room) error {
 		return fmt.Errorf("room %s already exists", r.ID)
 	}
 	s.rooms[r.ID] = r
+	if r.ShortCode != "" {
+		s.shortCode[r.ShortCode] = r.ID
+	}
 	return nil
 }
 
@@ -226,10 +252,29 @@ func (s *Store) GetRoom(id RoomID) (*Room, error) {
 	return r, nil
 }
 
-// RemoveRoom deletes a room from the store
+// RoomByShortCode resolves the shareable 5-char alias to the underlying room.
+// Returns an error when the code is not registered.
+func (s *Store) RoomByShortCode(code string) (*Room, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rid, ok := s.shortCode[code]
+	if !ok {
+		return nil, fmt.Errorf("short code %s not found", code)
+	}
+	r, ok := s.rooms[rid]
+	if !ok {
+		return nil, fmt.Errorf("room %s not found", rid)
+	}
+	return r, nil
+}
+
+// RemoveRoom deletes a room from the store, including its short-code alias.
 func (s *Store) RemoveRoom(id RoomID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r, ok := s.rooms[id]; ok && r.ShortCode != "" {
+		delete(s.shortCode, r.ShortCode)
+	}
 	delete(s.rooms, id)
 }
 
@@ -242,6 +287,25 @@ func (s *Store) CreateRoom(adminName string) (*Room, *Player, error) {
 	admin := &Player{ID: pid, Name: adminName, Token: token}
 	room := NewRoom(pid)
 	room.players[pid] = admin
+
+	// Generate a unique short code; retry on collision.
+	for attempt := 0; attempt < 32; attempt++ {
+		code, err := generateShortCode()
+		if err != nil {
+			return nil, nil, err
+		}
+		s.mu.RLock()
+		_, taken := s.shortCode[code]
+		s.mu.RUnlock()
+		if !taken {
+			room.ShortCode = code
+			break
+		}
+	}
+	if room.ShortCode == "" {
+		return nil, nil, fmt.Errorf("failed to generate a unique short code")
+	}
+
 	if err := s.AddRoom(room); err != nil {
 		return nil, nil, err
 	}
@@ -327,9 +391,13 @@ func (s *Store) CleanupInactiveRooms(d time.Duration) []RoomID {
 			}
 		}
 		idle := now.Sub(r.lastAct) > d && connected == 0
+		code := r.ShortCode
 		r.mu.Unlock()
 		if idle {
 			delete(s.rooms, id)
+			if code != "" {
+				delete(s.shortCode, code)
+			}
 			removed = append(removed, id)
 		}
 	}
